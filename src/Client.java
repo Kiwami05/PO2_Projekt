@@ -1,10 +1,14 @@
 import java.io.*;
+import java.net.Socket;
 import java.util.*;
 import javax.swing.*;
 import java.awt.*;
 import java.awt.event.*;
+import java.net.ServerSocket;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
-class Product {
+class Product implements Serializable {
     String name;
     double quantity;
     String unit;
@@ -22,16 +26,20 @@ class Product {
 }
 
 class ProductListManager {
-    private final Map<String, Set<Product>> productList;
+    private Map<String, Set<Product>> productList;
     final Set<String> availableUnits;
+    private final String serverAddress;
+    private final int serverPort;
 
-    public ProductListManager() {
+    public ProductListManager(String serverAddress, int serverPort) {
         this.productList = new HashMap<>();
         this.availableUnits = new HashSet<>(Arrays.asList("sztuki", "kg", "m", "l"));
+        this.serverAddress = serverAddress;
+        this.serverPort = serverPort;
     }
 
     public void addCategory(String category) {
-        productList.putIfAbsent(category, new HashSet<>());
+        sendRequest("ADD_CATEGORY", category);
     }
 
 
@@ -41,40 +49,32 @@ class ProductListManager {
     }
 
     public void removeProduct(String category, String name) {
-        Set<Product> products = productList.get(category);
-        if (products != null) {
-            products.removeIf(product -> product.name.equals(name));
-        }
+        sendRequest("REMOVE_PRODUCT", category, name);
     }
 
     public void addProduct(String category, String name, double quantity, String unit) {
-        if (!availableUnits.contains(unit)) {
-            System.err.println("Nieprawidłowa jednostka miary: " + unit);
-            return;
-        }
-
-        Product product = new Product(name, quantity, unit);
-        productList.computeIfAbsent(category, k -> new HashSet<>()).add(product);
+        sendRequest("ADD_PRODUCT", category, name, String.valueOf(quantity), unit);
     }
 
     public void editProduct(String category, String oldName, String newName, double newQuantity, String newUnit) {
-        if (!availableUnits.contains(newUnit)) {
-            System.err.println("Nieprawidłowa jednostka miary: " + newUnit);
-            return;
-        }
+        sendRequest("EDIT_PRODUCT", category, oldName, newName, String.valueOf(newQuantity), newUnit);
+    }
 
-        Set<Product> products = productList.get(category);
-        if (products != null) {
-            for (Product product : products) {
-                if (product.name.equals(oldName)) {
-                    products.remove(product);
-                    Product newProduct = new Product(newName, newQuantity, newUnit);
-                    products.add(newProduct);
-                    return;
-                }
-            }
+    void sendRequest(String requestType, String... args) {
+        try {
+            Socket socket = new Socket(serverAddress, serverPort);
+            ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
+            out.writeObject(requestType);
+            out.writeObject(args);
+            out.flush();
+
+            ObjectInputStream in = new ObjectInputStream(socket.getInputStream());
+            productList = (Map<String, Set<Product>>) in.readObject();
+
+            socket.close();
+        } catch (IOException | ClassNotFoundException e) {
+            e.printStackTrace();
         }
-        System.err.println("Nie znaleziono produktu: " + oldName + " w kategorii " + category);
     }
 
     public static void saveToFile(Map<String, Set<Product>> productList, String filePath) throws IOException {
@@ -112,7 +112,102 @@ class ProductListManager {
     // Dostosuj pozostałe metody do obsługi obiektów Product zamiast samych nazw produktów
 }
 
-public class Projekt extends JFrame {
+class Server {
+    private static final int SERVER_PORT = 8000;
+    private static final int THREAD_POOL_SIZE = 5;
+    private static Map<String, Set<Product>> sharedProductList = new HashMap<>();
+    private static final Set<String> availableUnits = new HashSet<>(Arrays.asList("sztuki", "kg", "m", "l"));
+
+    public static void main(String[] args) {
+        ExecutorService executor = Executors.newFixedThreadPool(THREAD_POOL_SIZE);
+
+        try (ServerSocket serverSocket = new ServerSocket(SERVER_PORT)) {
+            System.out.println("Serwer uruchomiony na porcie " + SERVER_PORT);
+
+            while (true) {
+                Socket clientSocket = serverSocket.accept();
+                executor.execute(() -> handleClientRequest(clientSocket));
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private static void handleClientRequest(Socket clientSocket) {
+        try (ObjectInputStream in = new ObjectInputStream(clientSocket.getInputStream());
+             ObjectOutputStream out = new ObjectOutputStream(clientSocket.getOutputStream())) {
+            String requestType = (String) in.readObject();
+            String[] args = (String[]) in.readObject();
+
+            synchronized (sharedProductList) {
+                switch (requestType) {
+                    case "ADD_CATEGORY":
+                        addCategory(args[0]);
+                        break;
+                    case "REMOVE_PRODUCT":
+                        removeProduct(args[0], args[1]);
+                        break;
+                    case "ADD_PRODUCT":
+                        addProduct(args[0], args[1], Double.parseDouble(args[2]), args[3]);
+                        break;
+                    case "EDIT_PRODUCT":
+                        editProduct(args[0], args[1], args[2], Double.parseDouble(args[3]), args[4]);
+                        break;
+                }
+            }
+
+            out.writeObject(sharedProductList);
+            out.flush();
+
+            clientSocket.close();
+        } catch (IOException | ClassNotFoundException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private static void addCategory(String category) {
+        sharedProductList.putIfAbsent(category, new HashSet<>());
+    }
+
+    private static void removeProduct(String category, String name) {
+        Set<Product> products = sharedProductList.get(category);
+        if (products != null) {
+            products.removeIf(product -> product.name.equals(name));
+        }
+    }
+
+    private static void addProduct(String category, String name, double quantity, String unit) {
+        if (!availableUnits.contains(unit)) {
+            System.err.println("Nieprawidłowa jednostka miary: " + unit);
+            return;
+        }
+
+        Product product = new Product(name, quantity, unit);
+        sharedProductList.computeIfAbsent(category, k -> new HashSet<>()).add(product);
+    }
+
+    private static void editProduct(String category, String oldName, String newName, double newQuantity, String newUnit) {
+        if (!availableUnits.contains(newUnit)) {
+            System.err.println("Nieprawidłowa jednostka miary: " + newUnit);
+            return;
+        }
+
+        Set<Product> products = sharedProductList.get(category);
+        if (products != null) {
+            for (Product product : products) {
+                if (product.name.equals(oldName)) {
+                    products.remove(product);
+                    Product newProduct = new Product(newName, newQuantity, newUnit);
+                    products.add(newProduct);
+                    return;
+                }
+            }
+        }
+        System.err.println("Nie znaleziono produktu: " + oldName + " w kategorii " + category);
+    }
+}
+
+public class Client extends JFrame {
     private ProductListManager manager;
     private JComboBox<String> categoryComboBox;
     private DefaultListModel<Product> productListModel;
@@ -122,13 +217,13 @@ public class Projekt extends JFrame {
     private JComboBox<String> unitComboBox;
 
 
-    public Projekt() {
+    public Client(String serverAddress, int serverPort) {
         super("Lista zakupów");
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setSize(600, 500);
         setLocationRelativeTo(null);
 
-        manager = new ProductListManager();
+        manager = new ProductListManager(serverAddress, serverPort);
 
         // Inicjalizacja komponentów GUI
         categoryComboBox = new JComboBox<>();
@@ -137,7 +232,6 @@ public class Projekt extends JFrame {
         productList = new JList<>(productListModel);
         productNameField = new JTextField();
         productQuantityField = new JTextField();
-//        productUnitField = new JTextField();
         unitComboBox = new JComboBox<>();
 
 
@@ -148,26 +242,7 @@ public class Projekt extends JFrame {
         JPanel buttonsPanel = new JPanel(new FlowLayout());
 
 
-// Dla opcji w menu (wymaga dodania paska menu)
-        JMenuBar menuBar = new JMenuBar();
-
-        JMenu fileMenu = new JMenu("Plik");
-        JMenuItem openMenuItem = new JMenuItem("Otwórz");
-        JMenuItem saveMenuItem = new JMenuItem("Zapisz");
-        openMenuItem.addActionListener(e -> loadFromFile());
-        saveMenuItem.addActionListener(e -> saveToFile());
-        fileMenu.add(openMenuItem);
-        fileMenu.add(saveMenuItem);
-        menuBar.add(fileMenu);
-
-        JMenu viewMenu = new JMenu("Lista");
-        JMenuItem clearAllButton = new JMenuItem("Wyczyść listę");
-        JMenuItem showAllMenuItem = new JMenuItem("Pokaż wszystkie produkty");
-        clearAllButton.addActionListener(e -> clearAllProducts());
-        showAllMenuItem.addActionListener(e -> displayAllProducts());
-        viewMenu.add(showAllMenuItem);
-        viewMenu.add(clearAllButton);
-        menuBar.add(viewMenu);
+        JMenuBar menuBar = getjMenuBar();
         setJMenuBar(menuBar);
 
         categoryPanel.add(new JLabel("Kategoria:"));
@@ -227,8 +302,33 @@ public class Projekt extends JFrame {
         removeCategoryButton.addActionListener(e -> removeCategory());
 
         add(mainPanel);
+        manager.sendRequest("GET_LIST");
         updateCategoryComboBox();
+        updateProductList();
         setVisible(true);
+    }
+
+    private JMenuBar getjMenuBar() {
+        JMenuBar menuBar = new JMenuBar();
+
+        JMenu fileMenu = new JMenu("Plik");
+        JMenuItem openMenuItem = new JMenuItem("Otwórz");
+        JMenuItem saveMenuItem = new JMenuItem("Zapisz");
+        openMenuItem.addActionListener(e -> loadFromFile());
+        saveMenuItem.addActionListener(e -> saveToFile());
+        fileMenu.add(openMenuItem);
+        fileMenu.add(saveMenuItem);
+        menuBar.add(fileMenu);
+
+        JMenu viewMenu = new JMenu("Lista");
+        JMenuItem clearAllButton = new JMenuItem("Wyczyść listę");
+        JMenuItem showAllMenuItem = new JMenuItem("Pokaż wszystkie produkty");
+        clearAllButton.addActionListener(e -> clearAllProducts());
+        showAllMenuItem.addActionListener(e -> displayAllProducts());
+        viewMenu.add(showAllMenuItem);
+        viewMenu.add(clearAllButton);
+        menuBar.add(viewMenu);
+        return menuBar;
     }
 
     private void saveToFile() {
@@ -420,10 +520,12 @@ public class Projekt extends JFrame {
     private void clearFields() {
         productNameField.setText("");
         productQuantityField.setText("");
-//        productUnitField.setText("");
     }
 
     public static void main(String[] args) {
-        SwingUtilities.invokeLater(Projekt::new);
+        String serverAddress = JOptionPane.showInputDialog(null, "Wprowadź adres IP serwera:", "127.0.0.1");
+        int serverPort = 8000; // Ustaw port serwera
+
+        SwingUtilities.invokeLater(() -> new Client(serverAddress, serverPort).setVisible(true));
     }
 }
