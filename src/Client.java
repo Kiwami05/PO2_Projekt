@@ -1,220 +1,18 @@
 import java.io.*;
-import java.net.Socket;
 import java.util.*;
 import javax.swing.*;
 import java.awt.*;
 import java.awt.event.*;
-import java.net.ServerSocket;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-
-class Product implements Serializable {
-    String name;
-    double quantity;
-    String unit;
-
-    public Product(String name, double quantity, String unit) {
-        this.name = name;
-        this.quantity = quantity;
-        this.unit = unit;
-    }
-
-    @Override
-    public String toString() {
-        return name + " (" + quantity + " " + unit + ")";
-    }
-}
-
-class ProductListManager {
-    private Map<String, Set<Product>> productList;
-    final Set<String> availableUnits;
-    private final String serverAddress;
-    private final int serverPort;
-
-    public ProductListManager(String serverAddress, int serverPort) {
-        this.productList = new HashMap<>();
-        this.availableUnits = new HashSet<>(Arrays.asList("sztuki", "kg", "m", "l"));
-        this.serverAddress = serverAddress;
-        this.serverPort = serverPort;
-    }
-
-    public void addCategory(String category) {
-        sendRequest("ADD_CATEGORY", category);
-    }
-
-
-    // Pozostałe metody z oryginalnego kodu...
-    public Map<String, Set<Product>> getProductList() {
-        return productList;
-    }
-
-    public void removeProduct(String category, String name) {
-        sendRequest("REMOVE_PRODUCT", category, name);
-    }
-
-    public void addProduct(String category, String name, double quantity, String unit) {
-        sendRequest("ADD_PRODUCT", category, name, String.valueOf(quantity), unit);
-    }
-
-    public void editProduct(String category, String oldName, String newName, double newQuantity, String newUnit) {
-        sendRequest("EDIT_PRODUCT", category, oldName, newName, String.valueOf(newQuantity), newUnit);
-    }
-
-    void sendRequest(String requestType, String... args) {
-        try {
-            Socket socket = new Socket(serverAddress, serverPort);
-            ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
-            out.writeObject(requestType);
-            out.writeObject(args);
-            out.flush();
-
-            ObjectInputStream in = new ObjectInputStream(socket.getInputStream());
-            productList = (Map<String, Set<Product>>) in.readObject();
-
-            socket.close();
-        } catch (IOException | ClassNotFoundException e) {
-            e.printStackTrace();
-        }
-    }
-
-    public static void saveToFile(Map<String, Set<Product>> productList, String filePath) throws IOException {
-        // Przykładowa implementacja zapisu do pliku CSV
-        try (PrintWriter writer = new PrintWriter(new FileWriter(filePath))) {
-            for (Map.Entry<String, Set<Product>> entry : productList.entrySet()) {
-                String category = entry.getKey();
-                for (Product product : entry.getValue()) {
-                    writer.println(category + "," + product.name + "," + product.quantity + "," + product.unit);
-                }
-            }
-        }
-    }
-
-    public static Map<String, Set<Product>> loadFromFile(String filePath) throws IOException {
-        Map<String, Set<Product>> productList = new HashMap<>();
-        // Przykładowa implementacja odczytu z pliku CSV
-        try (BufferedReader reader = new BufferedReader(new FileReader(filePath))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                String[] parts = line.split(",");
-                if (parts.length == 4) {
-                    String category = parts[0];
-                    String name = parts[1];
-                    double quantity = Double.parseDouble(parts[2]);
-                    String unit = parts[3];
-                    Product product = new Product(name, quantity, unit);
-                    productList.computeIfAbsent(category, k -> new HashSet<>()).add(product);
-                }
-            }
-        }
-        return productList;
-    }
-
-    // Dostosuj pozostałe metody do obsługi obiektów Product zamiast samych nazw produktów
-}
-
-class Server {
-    private static final int SERVER_PORT = 8000;
-    private static final int THREAD_POOL_SIZE = 5;
-    private static Map<String, Set<Product>> sharedProductList = new HashMap<>();
-    private static final Set<String> availableUnits = new HashSet<>(Arrays.asList("sztuki", "kg", "m", "l"));
-
-    public static void main(String[] args) {
-        ExecutorService executor = Executors.newFixedThreadPool(THREAD_POOL_SIZE);
-
-        try (ServerSocket serverSocket = new ServerSocket(SERVER_PORT)) {
-            System.out.println("Serwer uruchomiony na porcie " + SERVER_PORT);
-
-            while (true) {
-                Socket clientSocket = serverSocket.accept();
-                executor.execute(() -> handleClientRequest(clientSocket));
-            }
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-    }
-
-    private static void handleClientRequest(Socket clientSocket) {
-        try (ObjectInputStream in = new ObjectInputStream(clientSocket.getInputStream());
-             ObjectOutputStream out = new ObjectOutputStream(clientSocket.getOutputStream())) {
-            String requestType = (String) in.readObject();
-            String[] args = (String[]) in.readObject();
-
-            synchronized (sharedProductList) {
-                switch (requestType) {
-                    case "ADD_CATEGORY":
-                        addCategory(args[0]);
-                        break;
-                    case "REMOVE_PRODUCT":
-                        removeProduct(args[0], args[1]);
-                        break;
-                    case "ADD_PRODUCT":
-                        addProduct(args[0], args[1], Double.parseDouble(args[2]), args[3]);
-                        break;
-                    case "EDIT_PRODUCT":
-                        editProduct(args[0], args[1], args[2], Double.parseDouble(args[3]), args[4]);
-                        break;
-                }
-            }
-
-            out.writeObject(sharedProductList);
-            out.flush();
-
-            clientSocket.close();
-        } catch (IOException | ClassNotFoundException e) {
-            e.printStackTrace();
-        }
-    }
-
-    private static void addCategory(String category) {
-        sharedProductList.putIfAbsent(category, new HashSet<>());
-    }
-
-    private static void removeProduct(String category, String name) {
-        Set<Product> products = sharedProductList.get(category);
-        if (products != null) {
-            products.removeIf(product -> product.name.equals(name));
-        }
-    }
-
-    private static void addProduct(String category, String name, double quantity, String unit) {
-        if (!availableUnits.contains(unit)) {
-            System.err.println("Nieprawidłowa jednostka miary: " + unit);
-            return;
-        }
-
-        Product product = new Product(name, quantity, unit);
-        sharedProductList.computeIfAbsent(category, k -> new HashSet<>()).add(product);
-    }
-
-    private static void editProduct(String category, String oldName, String newName, double newQuantity, String newUnit) {
-        if (!availableUnits.contains(newUnit)) {
-            System.err.println("Nieprawidłowa jednostka miary: " + newUnit);
-            return;
-        }
-
-        Set<Product> products = sharedProductList.get(category);
-        if (products != null) {
-            for (Product product : products) {
-                if (product.name.equals(oldName)) {
-                    products.remove(product);
-                    Product newProduct = new Product(newName, newQuantity, newUnit);
-                    products.add(newProduct);
-                    return;
-                }
-            }
-        }
-        System.err.println("Nie znaleziono produktu: " + oldName + " w kategorii " + category);
-    }
-}
 
 public class Client extends JFrame {
-    private ProductListManager manager;
-    private JComboBox<String> categoryComboBox;
-    private DefaultListModel<Product> productListModel;
-    private JList<Product> productList;
-    private JTextField productNameField, productQuantityField, productUnitField;
-    private JTextField categoryField;
-    private JComboBox<String> unitComboBox;
+    private final ProductListManager manager;
+    private final JComboBox<String> categoryComboBox;
+    private final DefaultListModel<Product> productListModel;
+    private final JList<Product> productList;
+    private final JTextField productNameField;
+    private final JTextField productQuantityField;
+    private final JTextField categoryField;
+    private final JComboBox<String> unitComboBox;
 
 
     public Client(String serverAddress, int serverPort) {
@@ -425,7 +223,7 @@ public class Client extends JFrame {
         String quantityStr = productQuantityField.getText().trim();
         String unit = (String) unitComboBox.getSelectedItem();
 
-        if (!name.isEmpty() && !quantityStr.isEmpty() && !unit.isEmpty()) {
+        if (!name.isEmpty() && !quantityStr.isEmpty() && !Objects.requireNonNull(unit).isEmpty()) {
             try {
                 double quantity = Double.parseDouble(quantityStr);
                 if (quantity <= 0) {
